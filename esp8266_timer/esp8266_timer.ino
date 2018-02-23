@@ -7,16 +7,27 @@
 constexpr int GPIO_BUZZER PROGMEM = 5;
 constexpr int GPIO_RELAY PROGMEM = 4;
 
-constexpr uint32_t DefaultTimeToCook = 30;//40*60;//40 min
+constexpr uint32_t DefaultTimeToCook = 40*60;//40 min
 constexpr uint32_t DefaultBuzzerCounter = 5;
 
+void OnStartTimer();
+void OnStopTimer();
+void OnCookTimerFinished();
+
 static uint32_t timeToCook = DefaultTimeToCook;
-static T_OFF cookTimer;
-static T_OFF buzzerTimer;
+static T_OFF cookTimer(&OnCookTimerFinished, &OnStartTimer, OnStopTimer);
+
+void OnBuzzerTimerFinished();
+
+static T_OFF buzzerTimer(&OnBuzzerTimerFinished);
 static bool buzzerOn = false;
 static uint32_t buzzerCounter = DefaultBuzzerCounter;
 
-static T_OFF mqttTimer;
+static bool MqttStartTimerCmd = false;
+
+void OnMqttTimerFinished();
+
+static T_OFF mqttTimer(&OnMqttTimerFinished);
 constexpr const char* MqttServer PROGMEM = "192.168.0.3";
 constexpr const uint16_t MqttPort PROGMEM = 1883;
 
@@ -24,14 +35,12 @@ constexpr const char* DeviceId PROGMEM = "unit1_device3";
 
 namespace Topics
 {
-constexpr const char* SetTime PROGMEM = "unit1/device3/timer/set_time";
-constexpr const char* AddTime PROGMEM = "unit1/device3/timer/add_time";
-constexpr const char* RemoveTime PROGMEM = "unit1/device3/timer/remove_time";
-constexpr const char* StartTimer PROGMEM = "unit1/device3/timer/start";
+constexpr const char* SetTime PROGMEM         = "unit1/device3/timer/set_time";
+constexpr const char* StartTimer PROGMEM      = "unit1/device3/timer/start";
 
-constexpr const char* TimerStarted PROGMEM = "unit1/device3/status/timer_started";
-constexpr const char* TimeElapsed PROGMEM = "unit1/device3/status/time_elapsed";
-constexpr const char* RelayIsOn PROGMEM = "unit1/device3/status/relay_is_on";
+constexpr const char* TimerStarted PROGMEM    = "unit1/device3/status/timer_started";
+constexpr const char* TimeElapsed PROGMEM     = "unit1/device3/status/time_elapsed";
+constexpr const char* RelayIsOn PROGMEM       = "unit1/device3/status/relay_is_on";
 }
 
 void MqttCallback(char* topic, byte* payload, unsigned int length);
@@ -62,53 +71,20 @@ void setup()
   Serial.println("Ready");
   Serial.print("IP address: ");
   Serial.println(WiFi.localIP());
-
-  //TMP:
-  cookTimer.Start(DefaultTimeToCook);
 }
 
 void loop() 
 {
-  if (cookTimer.IsElapsed())
-  {
-    Serial.println("Cooks finished!");
-    digitalWrite(GPIO_RELAY, LOW);
-    cookTimer.Stop();
-    buzzerOn = true;
-    buzzerCounter = DefaultBuzzerCounter;
-    buzzerTimer.Start(0);
-    PublishCurrentSettings();
-  }
-
-  if (buzzerTimer.IsElapsed())
-  {
-    if (buzzerCounter)
-    {
-      --buzzerCounter;
-      if (buzzerOn)
-        tone(GPIO_BUZZER, 3000);
-      else
-        noTone(GPIO_BUZZER);
-      buzzerOn = !buzzerOn;
-      buzzerTimer.Start(1);      
-    }
-    else
-    {
-        noTone(GPIO_BUZZER);
-        buzzerTimer.Stop();
-    }
-  }
-
-  if (MqttConnect()) 
+  if (MqttConnect())
   {
     mqtt.loop();
   }
 
-  if (mqttTimer.IsElapsed())
-  {
-    PublishCurrentStatus();
-    mqttTimer.Start(1);
-  }
+  cookTimer.Loop();
+
+  buzzerTimer.Loop();
+
+  mqttTimer.Loop();
 }
 
 bool StrEq(const char* s1, const char* s2)
@@ -132,29 +108,26 @@ void MqttCallback(char* topic, byte* payload, unsigned int length)
     timeToCook = text.toInt() * 60;
     Serial.print("MQTT SetTime: ");
     Serial.print(timeToCook);
-    Serial.println(" secs.");
-  }
-  else if (StrEq(topic, Topics::AddTime))
-  {
-    auto sec = text.toInt() * 60;
-    cookTimer.AddSeconds(sec);
-    timeToCook += sec;
-  }
-  else if (StrEq(topic, Topics::RemoveTime))
-  {
-    auto sec = text.toInt() * 60;
-    cookTimer.RemoveSeconds(sec);
-    if (timeToCook > sec)
-      timeToCook -= sec;
+    Serial.println(" sec.");
+    if (MqttStartTimerCmd)
+    {
+      cookTimer.UpdateTime(timeToCook);
+    }
   }
   else if (StrEq(topic, Topics::StartTimer))
   {
     Serial.print("MQTT StartTimer: ");
-    Serial.println(text.toInt() == 0 ? "Off" : "On");
-    if (text.toInt())
-      cookTimer.Start(timeToCook);
-    else
-      cookTimer.Stop();
+    auto isOn = text.toInt()  != 0;
+    Serial.println(isOn ? "On" : "Off");
+    if (MqttStartTimerCmd != isOn)
+    {
+      MqttStartTimerCmd = isOn;
+      Serial.println("  ...new timer on comand.");
+      if (isOn)
+        cookTimer.Start(timeToCook);
+      else
+        cookTimer.Stop();
+    }
   }
 }
 
@@ -172,8 +145,6 @@ bool MqttConnect()
     PublishCurrentSettings();
 
     mqtt.subscribe(Topics::SetTime);
-    mqtt.subscribe(Topics::AddTime);
-    mqtt.subscribe(Topics::RemoveTime);
     mqtt.subscribe(Topics::StartTimer);
     
     mqttTimer.Start(0);
@@ -187,30 +158,94 @@ bool MqttConnect()
   return false;
 }
 
+String NumToStr(uint32_t num)
+{
+  auto s = String(num);
+  if (s.length() < 2)
+    s = '0' + s;
+  return s;
+}
+
 void PublishCurrentStatus()
 {
-  auto isRun = !cookTimer.IsElapsed();
+  Serial.print("Publish is run: ");
+  auto isRun = cookTimer.IsRun();
+  Serial.println(isRun);
   mqtt.publish(Topics::TimerStarted, String(isRun).c_str());
   if (isRun)
   {
-    auto secs = cookTimer.ElapsedSeconds();
-    Serial.print("Elapsed: ");
-    Serial.print(secs);
-    Serial.println(" secs.");
-    mqtt.publish(Topics::TimeElapsed, String(secs / 60).c_str());
+    auto sec = cookTimer.ElapsedSeconds();
+    auto s = NumToStr(sec / 3600) + ':';
+    s += NumToStr((sec % 3600) / 60) + ':';
+    s += NumToStr((sec % 3600) % 60);
+    Serial.print("Publish elapsed: ");
+    Serial.println(s);
+    mqtt.publish(Topics::TimeElapsed, s.c_str(), true);
   }
   else
   {
-    mqtt.publish(Topics::TimeElapsed, 0);
+    mqtt.publish(Topics::TimeElapsed, "00:00:00", true);
   }
-  mqtt.publish(Topics::RelayIsOn, String(digitalRead(GPIO_RELAY)).c_str());
+
+  Serial.print("Publish RelayIsOn: ");
+  auto r = digitalRead(GPIO_RELAY);
+  Serial.println(r);
+  mqtt.publish(Topics::RelayIsOn, String(r).c_str(), true);
 }
 
 void PublishCurrentSettings()
 {
-  mqtt.publish(Topics::SetTime, String(timeToCook / 60).c_str());
-  mqtt.publish(Topics::AddTime, "0");
-  mqtt.publish(Topics::RemoveTime, "0");
-  mqtt.publish(Topics::StartTimer, String(!cookTimer.IsElapsed()).c_str());
+  Serial.print("PublishCurrentSettings. Is timer start: ");
+  Serial.println(MqttStartTimerCmd);
+  mqtt.publish(Topics::SetTime, String(timeToCook / 60).c_str(), true);
+  mqtt.publish(Topics::StartTimer, String(MqttStartTimerCmd).c_str(), true);
+}
+
+void OnStartTimer()
+{
+  Serial.println("Power ON relay.");
+  digitalWrite(GPIO_RELAY, HIGH);
+}
+
+void OnStopTimer()
+{
+  Serial.println("Power OFF relay.");
+  digitalWrite(GPIO_RELAY, LOW);
+}
+
+void OnCookTimerFinished()
+{
+  Serial.println("Cooks finished!");
+  cookTimer.Stop();
+  buzzerOn = true;
+  buzzerCounter = DefaultBuzzerCounter;
+  buzzerTimer.Start(0);
+  MqttStartTimerCmd = false;
+  PublishCurrentSettings();
+}
+
+void OnBuzzerTimerFinished()
+{
+  if (buzzerCounter)
+  {
+    --buzzerCounter;
+    if (buzzerOn)
+      tone(GPIO_BUZZER, 3000);
+    else
+      noTone(GPIO_BUZZER);
+    buzzerOn = !buzzerOn;
+    buzzerTimer.Start(1);
+  }
+  else
+  {
+      noTone(GPIO_BUZZER);
+      buzzerTimer.Stop();
+  }
+}
+
+void OnMqttTimerFinished()
+{
+  PublishCurrentStatus();
+  mqttTimer.Start(5);
 }
 

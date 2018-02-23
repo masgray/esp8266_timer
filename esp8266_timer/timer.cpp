@@ -7,34 +7,38 @@ constexpr uint32_t OneSecond = 1000;
 void T_OFF::Start(uint32_t seconds)
 {
   m_isRun = true;
-  m_millisWhenElapsed = millis() + seconds * OneSecond;
+  UpdateTime(seconds);
+  if (m_onStartTimer)
+    m_onStartTimer();
 }
 
 void T_OFF::Stop()
 {
   m_isRun = false;
+  if (m_onStopTimer)
+    m_onStopTimer();
 }
 
-bool T_OFF::IsElapsed() const
+void T_OFF::Loop() const
 {
-  return m_isRun && millis() >= m_millisWhenElapsed;
+  if (m_isRun && (millis() >= m_millisWhenElapsed))
+    m_onTimerFinished();
+}
+
+void T_OFF::UpdateTime(uint32_t seconds)
+{
+  m_millisWhenElapsed = millis() + seconds * OneSecond;
+}
+
+bool T_OFF::IsRun() const
+{
+  return m_isRun;
 }
 
 uint32_t T_OFF::ElapsedSeconds() const
 {
-  return (m_millisWhenElapsed - millis()) / OneSecond;
-}
-
-void T_OFF::AddSeconds(uint32_t seconds)
-{
-  m_millisWhenElapsed += seconds * OneSecond;
-}
-
-void T_OFF::RemoveSeconds(uint32_t seconds)
-{
-  if (ElapsedSeconds() > seconds)
-    m_millisWhenElapsed -= seconds * OneSecond;
-  else
-    m_millisWhenElapsed = millis();
+  if (m_isRun)
+    return (m_millisWhenElapsed - millis()) / OneSecond;
+  return 0;
 }
 
