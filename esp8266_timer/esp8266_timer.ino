@@ -190,7 +190,7 @@ void PublishCurrentStatus()
   Serial.print("Publish RelayIsOn: ");
   auto r = digitalRead(GPIO_RELAY);
   Serial.println(r);
-  mqtt.publish(Topics::RelayIsOn, String(r).c_str(), true);
+  mqtt.publish(Topics::RelayIsOn, String(r == 0).c_str(), true);
 }
 
 void PublishCurrentSettings()
@@ -204,13 +204,13 @@ void PublishCurrentSettings()
 void OnStartTimer()
 {
   Serial.println("Power ON relay.");
-  digitalWrite(GPIO_RELAY, HIGH);
+  digitalWrite(GPIO_RELAY, LOW);//inverse relay
 }
 
 void OnStopTimer()
 {
   Serial.println("Power OFF relay.");
-  digitalWrite(GPIO_RELAY, LOW);
+  digitalWrite(GPIO_RELAY, HIGH);//inverse relay
 }
 
 void OnCookTimerFinished()
@@ -246,6 +246,6 @@ void OnBuzzerTimerFinished()
 void OnMqttTimerFinished()
 {
   PublishCurrentStatus();
-  mqttTimer.Start(5);
+  mqttTimer.Start(1);
 }
 
